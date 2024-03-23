@@ -1,0 +1,2775 @@
+---
+title: "Updated DrugDx Script"
+author: "Lauren Berny"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(rio)
+library(janitor)
+library(glmnet)
+library(recipes)
+library(cutpointr)
+library(vip)
+library(caret)
+library(gtools)
+library(Matrix)
+library(kableExtra)
+library(randomForest)
+library(randomForestExplainer)
+library(MLmetrics)
+library(viridis)
+library(xgboost)
+library(gbm)
+library(breakDown)
+library(DALEX)
+library(iml)
+library(waterfalls)
+library(tidymodels)
+library(tidyverse)
+library(patchwork)
+library(stringr)
+library(moreparty)
+
+DS1 <- import(here("36769-0001-Data.dta"))
+
+DS2 <- import(here("36769-0002-Data.dta"))
+
+DS3 <- import(here("36769-0003-Data.dta"))
+```
+
+# Prep
+## Recode Missing and Clean Names
+```{r}
+ds1 <- DS1 %>%
+ mutate_all(~ ifelse(. %in% c(-9, 8888, 9999), NA, .)) %>% 
+ clean_names()
+
+ds2 <- DS2 %>%
+ mutate_all(~ ifelse(. %in% c(-9, 8888, 9999), NA, .)) %>% 
+ clean_names()
+
+ds3 <- DS3 %>%
+ mutate_all(~ ifelse(. %in% c(-9, 8888, 9999), NA, .)) %>% 
+ clean_names()
+```
+
+
+## Make Factors
+
+```{r}
+ds1$demoage <- factor(ds1$demoage, levels = c(1, 2, 3), 
+                      labels = c("Age 14 to 17", "Age 18 to 20", "Age 21 to 24"))
+
+ds1$demorac <- factor(ds1$demorac, levels = c(4, 5, 6, 7),
+                      labels = c("AA or Black", "White", "Multiple Races", 
+                                 "American Indian/Asian/Native Hawaiian"))
+
+ds1$demosex <- factor(ds1$demosex, levels = c(1, 2),
+                      labels = c("Male", "Female"))
+
+ds1$livewith <- factor(ds1$livewith, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$school <- factor(ds1$school, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$gang1 <- factor(ds1$gang1, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1 <- mutate(ds1, weapon1 = ifelse(weapon1 > 0, 1, 0))
+
+ds1 <- mutate(ds1, weapon2a = ifelse(weapon2a > 0, 1, 0))
+
+ds1$weapon1 <- factor(ds1$weapon1, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$weapon2a <- factor(ds1$weapon2a, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$sexint <- factor(ds1$sex, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$binge <- factor(ds1$binge, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$publicass <- factor(ds1$publicass, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$partnervic <- factor(ds1$partnervic, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds1$pcts <- factor(ds1$pcts, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$vgroup <- factor(ds2$vgroup, levels = c(0, 1), 
+                     labels = c("Comparison Group", "Assaulted Group"))
+
+ds2$alcdx <- factor(ds2$alcdx, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$drugdx <- factor(ds2$drugdx, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$ptsd <- factor(ds2$ptsd, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$cdapd <- factor(ds2$conductdisorder, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$legalsev <- ds2$asiteen11
+
+ds2$sexdrug <- factor(ds2$sexdrug, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$mentman <- factor(ds2$mentman, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds2$mentwoman <- factor(ds2$mentwoman, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$vgroup <- factor(ds3$vgroup, levels = c(0, 1), 
+                     labels = c("Comparison Group", "Assaulted Group"))
+
+ds3$alcdx <- factor(ds3$alcdx, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$drugdx <- factor(ds3$drugdx, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$ptsd <- factor(ds3$ptsd, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$cdapd <- factor(ds3$apd, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$legalsev <- ds3$asi12
+
+ds3$sexdrug <- factor(ds3$sexdrug, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$mentman <- factor(ds3$mentman, levels = c(0, 1), labels = c("No", "Yes"))
+
+ds3$mentwoman <- factor(ds3$mentwoman, levels = c(0, 1), labels = c("No", "Yes"))
+```
+
+## Reverse and Scales
+
+```{r}
+ds1$grades_rev <- 10 - ds1$grades
+
+ds1$reatt_rev <- 35 - ds1$reatt
+
+ds1$fight <- rowMeans(ds1[, c("fight1", "fight2", "fight3", "fight4")], na.rm = TRUE)
+
+ds2$dui <- rowMeans(ds2[, c("dui1", "dui2", "dui3", "dui4", "dui5")], na.rm = TRUE)
+
+ds2$infrndps <- rowMeans(ds2[, c("infrndps1", "infrndps2", "infrndps3", "infrndps4")], 
+                         na.rm = TRUE)
+
+ds2$infrndng <- rowMeans(ds2[, c("infrndng1", "infrndng5", "infrndng6", "infrndng10",
+                                 "infrndng12", "infrndng13", "infrndng15")], 
+                         na.rm = TRUE)
+
+ds2$parntsup <- rowMeans(ds2[, c("parntsup1", "parntsup2", "parntsup3", "parntsup4",
+                                 "parntsup5", "parntsup6")], 
+                         na.rm = TRUE)
+
+ds2$prntdral <- rowMeans(ds2[, c("prntdral3", "prntdral4", "prntdral6", "prntdral10")], 
+                         na.rm = TRUE)
+
+ds2$famanger <- rowMeans(ds2[, c("famanger1", "famanger2", "famanger3", "famanger4")], 
+                         na.rm = TRUE)
+
+ds2$nofight <- rowMeans(ds2[, c("nofight_r1", "nofight_r2", "nofight_r3", "nofight_r4",
+                                "nofight_r5")], 
+                        na.rm = TRUE)
+
+ds2$commviol <- rowMeans(ds2[, c("commviol1", "commviol3", "commviol5", "commviol10")], 
+                         na.rm = TRUE)
+
+ds2$sedare <- 6 - rowMeans(ds2[, c("sedare1", "sedare2", "sedare3", "sedare4", "sedare5",
+                               "sedare6", "sedare7", "sedare8")], na.rm = TRUE)
+
+ds2$sedarea <- 6 - rowMeans(ds2[, c("sedarea1", "sedarea2", "sedarea3", "sedarea4", "sedarea5",
+                               "sedarea6", "sedarea7", "sedarea8")], na.rm = TRUE)
+
+ds3$dui <- rowMeans(ds3[, c("dui1", "dui2", "dui3", "dui4", "dui5")], na.rm = TRUE)
+
+ds3$infrndps <- rowMeans(ds3[, c("infrndps1", "infrndps2", "infrndps3", "infrndps4")], 
+                         na.rm = TRUE)
+
+ds3$infrndng <- rowMeans(ds3[, c("infrndng1", "infrndng5", "infrndng6", "infrndng10",
+                                 "infrndng12", "infrndng13", "infrndng15")], 
+                         na.rm = TRUE)
+
+ds3$parntsup <- rowMeans(ds3[, c("parntsup1", "parntsup2", "parntsup3", "parntsup4",
+                                 "parntsup5", "parntsup6")], 
+                         na.rm = TRUE)
+
+ds3$prntdral <- rowMeans(ds3[, c("prntdral3", "prntdral4", "prntdral6", "prntdral10")], 
+                         na.rm = TRUE)
+
+ds3$famanger <- rowMeans(ds3[, c("famanger1", "famanger2", "famanger3", "famanger4")], 
+                         na.rm = TRUE)
+
+ds3$nofight <- rowMeans(ds3[, c("nofight_r1", "nofight_r2", "nofight_r3", "nofight_r4",
+                                "nofight_r5")], 
+                         na.rm = TRUE)
+
+ds3$commviol <- rowMeans(ds3[, c("commviol1", "commviol3", "commviol5", "commviol10")], 
+                         na.rm = TRUE)
+
+ds3$commviol <- rowMeans(ds3[, c("commviol1", "commviol3", "commviol5", "commviol10")], 
+                         na.rm = TRUE)
+
+ds3$sedare <- 6 - rowMeans(ds3[, c("sedare1", "sedare2", "sedare3", "sedare4", "sedare5",
+                               "sedare6", "sedare7", "sedare8")], na.rm = TRUE)
+
+ds3$sedarea <- 6 - rowMeans(ds3[, c("sedarea1", "sedarea2", "sedarea3", "sedarea4", "sedarea5",
+                               "sedarea6", "sedarea7", "sedarea8")], na.rm = TRUE)
+```
+
+## Select, Append, and Merge
+
+```{r}
+ds1 <- ds1 %>% 
+ select(deid, demoage, demosex, demorac, livewith, school, gang1, weapon1, weapon2a,
+        sexint, publicass, partnervic, pcts, fight, grades_rev, reatt_rev, pviclevel, 
+        pagglevel, binge)
+
+ds2 <- ds2 %>% 
+ select(deid, vgroup, alcdx, drugdx, ptsd, cdapd, legalsev, sexdrug, mentman, mentwoman,
+        dui, infrndps, infrndng, parntsup, prntdral, famanger, nofight, commviol,
+        bsi, anx, nprcts1to13, npects1to13, sedare, sedarea)
+
+ds3 <- ds3 %>% 
+ select(deid, vgroup, alcdx, drugdx, ptsd, cdapd, legalsev, sexdrug, mentman, mentwoman,
+        dui, infrndps, infrndng, parntsup, prntdral, famanger, nofight, commviol,
+        bsi, anx, nprcts1to13, npects1to13, sedare, sedarea)
+
+ds23 <- smartbind(ds2, ds3)
+
+rownames(ds23) <- NULL
+
+dat <- merge(ds1, ds23, by = "deid")
+
+# saveRDS(dat, "dat.RDS")
+```
+
+# Variable Labels (match to Table 1)
+Drug use disorder = drugdx   
+Age = demoage   
+Race = demorac   
+Biological sex = demosex   
+Public assistance = publicass   
+School enrollment = school   
+Academic performance = grades_rev   
+Condition = vgroup   
+Household = livewith   
+Parent support = parntsup   
+Parent substance use = prntdral   
+Family anger = famanger   
+Male mentor = mentman   
+Female mentor = mentwoman   
+Positive peer influence = infrndps   
+Negative peer influence = infrndng   
+Gang affiliation = gang1   
+Sexual intercourse = sexint   
+Fighting behavior = fight   
+Retaliation attitudes = reatt_rev   
+Ability to avoid fighting = nofight   
+Community violence = commviol   
+Knife/razor carrying = weapon1   
+Firearm carrying = weapon2a   
+Intimate partner violence = pcts   
+IPV victim = partnervic   
+IPV victim severity = pviclevel   
+IPV perpetrator severity = pagglevel   
+Non-partner violence victimization count = nprcts1to13   
+Non-partner violence perpetration count = npects1to13   
+Intoxicated driving = dui   
+Legal problem severity = legalsev
+Depression symptoms = bsi   
+Anxiety symptoms = anx   
+Posttraumatic stress disorder = ptsd   
+Conduct disorder or antisocial personality disorder = cdapd   
+Alcohol use disorder = alcdx   
+Binge drinking = binge   
+Intoxicated sex = drugsex   
+Drug refusal efficacy = sedare   
+Alcohol refusal efficacy = sedarea   
+
+# Recipe
+## Examine Missingness
+```{r}
+missing_columns <- colnames(dat)[apply(dat, 2, function(x) any(is.na(x)))]
+```
+
+# Make Recipe
+```{r}
+dat <- dat %>% 
+ relocate(drugdx)
+
+factor_cols_more_than_2_levels <- names(Filter(function(x) is.factor(x) && length(levels(x)) > 2, dat))
+
+blueprint <- recipe(x = dat, vars  = colnames(dat),
+                    roles = c('outcome', 'id', rep('predictor',40))) %>%
+ step_impute_bag(all_of(missing_columns), seed_val = sample.int(10312022)) %>%
+ step_dummy(all_of(factor_cols_more_than_2_levels),one_hot=TRUE)
+
+blueprint
+```
+
+
+
+# Cross-validation
+```{r}
+set.seed(10312022)
+
+# Shuffle the indices
+shuffle_indices <- sample(nrow(dat))
+
+# Create 10 folds with equal size
+folds <- cut(seq(1, nrow(dat)), breaks = 10, labels = FALSE)
+
+# Create the list for each fold 
+my.indices <- vector('list', 10)
+for (i in 1:10) {
+  my.indices[[i]] <- shuffle_indices[which(folds != i)]
+}
+
+# Define custom summary function for accuracy
+accuracySummary <- function(data, lev = NULL, model = NULL) {
+  acc <- sum(data$obs == data$pred) / length(data$obs)
+  out <- c(Accuracy = acc)
+  out
+}
+
+cv <- trainControl(method = "cv",
+                   index = my.indices,
+                   classProbs = TRUE,
+                   savePredictions = "final",
+                   returnData = TRUE,
+                   returnResamp = "final",
+                   summaryFunction = accuracySummary)
+```
+
+
+
+# No Penalty
+```{r}
+set.seed(10312022)
+noreg <- train(blueprint, 
+               data = dat, 
+               method = "glm",
+               family = 'binomial',
+               trControl = cv)
+
+pred <- noreg$pred$pred
+obs <- noreg$pred$obs
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), positive = "Yes")
+
+# Extract the confusion matrix
+cm <- conf_matrix$table
+
+# Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+TP <- cm[2, 2]
+TN <- cm[1, 1]
+FP <- cm[1, 2]
+FN <- cm[2, 1]
+
+# Calculate Accuracy
+noreg_ACC <- (TP + TN) / sum(cm)
+
+# Calculate Precision
+noreg_PRE <- TP / (TP + FP)
+
+# Calculate False Positive Rate (FPR)
+noreg_FPR <- FP / (FP + TN)
+
+# Calculate True Negative Rate (TNR)
+noreg_TNR <- TN / (TN + FP)
+
+# Calculate True Positive Rate (TPR)
+noreg_TPR <- TP / (TP + FN)
+
+# Calculate AUC
+cut.obj <- cutpointr(x = noreg$pred$Yes,
+                     class = noreg$pred$obs)
+noreg_AUC = cutpointr::auc(cut.obj)
+
+# Print the results
+print(paste("Area Under Curve (AUC):", noreg_AUC))
+print(paste("Accuracy:", noreg_ACC))
+print(paste("Precision:", noreg_PRE))
+print(paste("False Positive Rate (FPR):", noreg_FPR))
+print(paste("True Negative Rate (TNR):", noreg_TNR))
+print(paste("True Positive Rate (TPR):", noreg_TPR))
+```
+## Cross-fold Descriptives
+
+```{r}
+predictions_noreg <- noreg[["pred"]]
+
+# Initialize an empty matrix to store results
+xv_results <- matrix(NA, nrow = 10, ncol = 7,
+                  dimnames = list(NULL, c("Fold", "AUC", "ACC", "PRE", "FPR", "TNR", "TPR")))
+
+# Loop through each fold
+for (i in 1:10) {
+ # Subset the predictions dataframe for the current fold
+ fold <- subset(predictions_noreg, Resample == paste0("Resample", sprintf("%02d", i)))
+ 
+ # Create confusion matrix
+ conf_matrix <- confusionMatrix(data = factor(fold$pred), reference = factor(fold$obs), 
+                                positive = "Yes")
+ 
+ # Extract the confusion matrix
+ cm <- conf_matrix$table
+ 
+ # Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+ TP <- cm[2, 2]
+ TN <- cm[1, 1]
+ FP <- cm[1, 2]
+ FN <- cm[2, 1]
+ 
+ # Calculate Accuracy
+ ACC <- (TP + TN) / sum(cm)
+ 
+ # Calculate Precision
+ PRE <- TP / (TP + FP)
+ 
+ # Calculate False Positive Rate (FPR)
+ FPR <- FP / (FP + TN)
+ 
+ # Calculate True Negative Rate (TNR)
+ TNR <- TN / (TN + FP)
+ 
+ # Calculate True Positive Rate (TPR)
+ TPR <- TP / (TP + FN)
+ 
+ # Calculate AUC using cutpointr
+ cut.obj <- cutpointr(x = fold$Yes, class = fold$obs)
+ AUC <- cutpointr::auc(cut.obj)
+ 
+ # Store results in the matrix
+ xv_results[i, ] <- c(i, AUC, ACC, PRE, FPR, TNR, TPR)
+}
+
+# Print the results matrix
+xv_results_noreg <- as.data.frame(xv_results)
+
+# Columns to calculate means and standard deviations for
+columns_of_interest <- c("AUC", "ACC", "PRE", "FPR", "TNR", "TPR")
+
+# Create empty vectors to store results
+means <- numeric(length(columns_of_interest))
+std_devs <- numeric(length(columns_of_interest))
+
+# Loop through each column
+for (i in seq_along(columns_of_interest)) {
+  # Calculate mean for each column and round to the second decimal point
+  means[i] <- round(mean(xv_results_noreg[[columns_of_interest[i]]]), 2)
+  
+  # Calculate standard deviation for each column and round to the second decimal point
+  std_devs[i] <- round(sd(xv_results_noreg[[columns_of_interest[i]]]), 2)
+}
+
+# Combine results into a dataframe
+result_df <- data.frame(Column = columns_of_interest,
+                        Mean = means,
+                        StdDev = std_devs)
+
+print(result_df)
+```
+
+
+
+# Ridge
+```{r}
+set.seed(10312022)
+grid <- data.frame(alpha = 0, lambda = c(seq(0,2,.001)))
+
+ridge <- train(blueprint, 
+               data = dat, 
+               method = "glmnet",
+               family = 'binomial',
+               trControl = cv,
+               tuneGrid = grid)
+
+ridgelamb <- ridge[["bestTune"]][["lambda"]]
+
+set.seed(10312022)
+grid <- data.frame(alpha = 0, lambda = ridgelamb)
+
+ridge <- train(blueprint, 
+               data = dat, 
+               method = "glmnet",
+               family = 'binomial',
+               trControl = cv,
+               tuneGrid = grid)
+
+pred <- ridge$pred$pred
+obs <- ridge$pred$obs
+
+###########
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), positive = "Yes")
+
+# Extract the confusion matrix
+cm <- conf_matrix$table
+
+# Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+TP <- cm[2, 2]
+TN <- cm[1, 1]
+FP <- cm[1, 2]
+FN <- cm[2, 1]
+
+# Calculate Accuracy
+ridge_ACC <- (TP + TN) / sum(cm)
+
+# Calculate Precision
+ridge_PRE <- TP / (TP + FP)
+
+# Calculate False Positive Rate (FPR)
+ridge_FPR <- FP / (FP + TN)
+
+# Calculate True Negative Rate (TNR)
+ridge_TNR <- TN / (TN + FP)
+
+# Calculate True Positive Rate (TPR)
+ridge_TPR <- TP / (TP + FN)
+
+# Calculate AUC
+cut.obj <- cutpointr(x = ridge$pred$Yes,
+                     class = ridge$pred$obs)
+ridge_AUC = cutpointr::auc(cut.obj)
+
+# Print the results
+print(paste("Area Under Curve (AUC):", ridge_AUC))
+print(paste("Accuracy:", ridge_ACC))
+print(paste("Precision:", ridge_PRE))
+print(paste("False Positive Rate (FPR):", ridge_FPR))
+print(paste("True Negative Rate (TNR):", ridge_TNR))
+print(paste("True Positive Rate (TPR):", ridge_TPR))
+```
+
+
+## Cross-fold Descriptives
+
+```{r}
+predictions_ridge <- ridge[["pred"]]
+
+# Initialize an empty matrix to store results
+xv_results <- matrix(NA, nrow = 10, ncol = 7,
+                  dimnames = list(NULL, c("Fold", "AUC", "ACC", "PRE", "FPR", "TNR", "TPR")))
+
+# Loop through each fold
+for (i in 1:10) {
+ # Subset the predictions dataframe for the current fold
+ fold <- subset(predictions_ridge, Resample == paste0("Resample", sprintf("%02d", i)))
+ 
+ # Create confusion matrix
+ conf_matrix <- confusionMatrix(data = factor(fold$pred), reference = factor(fold$obs), 
+                                positive = "Yes")
+ 
+ # Extract the confusion matrix
+ cm <- conf_matrix$table
+ 
+ # Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+ TP <- cm[2, 2]
+ TN <- cm[1, 1]
+ FP <- cm[1, 2]
+ FN <- cm[2, 1]
+ 
+ # Calculate Accuracy
+ ACC <- (TP + TN) / sum(cm)
+ 
+ # Calculate Precision
+ PRE <- TP / (TP + FP)
+ 
+ # Calculate False Positive Rate (FPR)
+ FPR <- FP / (FP + TN)
+ 
+ # Calculate True Negative Rate (TNR)
+ TNR <- TN / (TN + FP)
+ 
+ # Calculate True Positive Rate (TPR)
+ TPR <- TP / (TP + FN)
+ 
+ # Calculate AUC using cutpointr
+ cut.obj <- cutpointr(x = fold$Yes, class = fold$obs)
+ AUC <- cutpointr::auc(cut.obj)
+ 
+ # Store results in the matrix
+ xv_results[i, ] <- c(i, AUC, ACC, PRE, FPR, TNR, TPR)
+}
+
+# Print the results matrix
+xv_results_ridge <- as.data.frame(xv_results)
+
+# Columns to calculate means and standard deviations for
+columns_of_interest <- c("AUC", "ACC", "PRE", "FPR", "TNR", "TPR")
+
+# Create empty vectors to store results
+means <- numeric(length(columns_of_interest))
+std_devs <- numeric(length(columns_of_interest))
+
+# Loop through each column
+for (i in seq_along(columns_of_interest)) {
+  # Calculate mean for each column and round to the second decimal point
+  means[i] <- round(mean(xv_results_ridge[[columns_of_interest[i]]]), 2)
+  
+  # Calculate standard deviation for each column and round to the second decimal point
+  std_devs[i] <- round(sd(xv_results_ridge[[columns_of_interest[i]]]), 2)
+}
+
+# Combine results into a dataframe
+result_df <- data.frame(Column = columns_of_interest,
+                        Mean = means,
+                        StdDev = std_devs)
+
+print(result_df)
+```
+
+# Lasso
+
+```{r}
+set.seed(10312022)
+grid <- data.frame(alpha = 1, lambda = c(seq(0, 2, .001)))
+
+lasso <- train(blueprint, 
+               data = dat, 
+               method = "glmnet",
+               family = 'binomial',
+               trControl = cv,
+               tuneGrid = grid)
+
+lassolamb <- lasso[["bestTune"]][["lambda"]]
+
+set.seed(10312022)
+grid <- data.frame(alpha = 1, lambda = lassolamb)
+
+lasso <- train(blueprint, 
+               data = dat, 
+               method = "glmnet",
+               family = 'binomial',
+               trControl = cv,
+               tuneGrid = grid)
+
+pred <- lasso$pred$pred
+obs <- lasso$pred$obs
+
+###########
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), positive = "Yes")
+
+# Extract the confusion matrix
+cm <- conf_matrix$table
+
+# Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+TP <- cm[2, 2]
+TN <- cm[1, 1]
+FP <- cm[1, 2]
+FN <- cm[2, 1]
+
+# Calculate Accuracy
+lasso_ACC <- (TP + TN) / sum(cm)
+
+# Calculate Precision
+lasso_PRE <- TP / (TP + FP)
+
+# Calculate False Positive Rate (FPR)
+lasso_FPR <- FP / (FP + TN)
+
+# Calculate True Negative Rate (TNR)
+lasso_TNR <- TN / (TN + FP)
+
+# Calculate True Positive Rate (TPR)
+lasso_TPR <- TP / (TP + FN)
+
+# Calculate AUC
+cut.obj <- cutpointr(x = lasso$pred$Yes,
+                     class = lasso$pred$obs)
+lasso_AUC = cutpointr::auc(cut.obj)
+
+# Print the results
+print(paste("Area Under Curve (AUC):", lasso_AUC))
+print(paste("Accuracy:", lasso_ACC))
+print(paste("Precision:", lasso_PRE))
+print(paste("False Positive Rate (FPR):", lasso_FPR))
+print(paste("True Negative Rate (TNR):", lasso_TNR))
+print(paste("True Positive Rate (TPR):", lasso_TPR))
+
+
+##########
+
+# lassocoefs <- coef(lasso$finalModel,lasso$bestTune$lambda)
+# sparse_df <- as.data.frame(as.matrix(lassocoefs))
+# sparse_df <- sparse_df %>% 
+#  filter(s1 != 0) %>% 
+#  mutate (direction = ifelse(s1 > 0, "Positive", "Negative"))
+# row_names <- rownames(sparse_df)
+# rownames(sparse_df) <- NULL
+# sparse_df$Variable <- row_names
+# sparse_df <- sparse_df %>% 
+#  relocate(Variable) %>% 
+#  filter(Variable != "(Intercept)")
+# 
+# lassoind   <- order(abs(lassocoefs[,1]),decreasing=T)
+# head(as.matrix(lassocoefs[lassoind,]),20)
+# 
+# importance <- varImp(lasso)
+# importance <- as.data.frame(as.matrix(importance[["importance"]]))
+# row_names <- rownames(importance)
+# rownames(importance) <- NULL
+# importance$Variable <- row_names
+# importance <- importance %>% 
+#  relocate(Variable)
+#  
+# importance <- merge(sparse_df, importance, by = "Variable")
+# 
+# importance %>% 
+#  ggplot(aes(x = Overall, y = reorder(Variable, Overall), 
+#             color = direction, shape = direction, fill = direction)) +
+#  geom_point(size = 3.5) +
+#  labs(x = "Importance", y = "Variable", color = "Direction", shape = "Direction",
+#       fill = "Direction") +
+#  scale_color_manual(values = c("#872CA2", "#DF488D")) + 
+#  scale_fill_manual(values = c("#872CA2", "#DF488D")) + 
+#  scale_shape_manual(values = c(25, 24)) + 
+#  theme_bw() +
+#  theme(
+#   legend.position = "bottom",
+#   panel.grid.major.x = element_blank(),
+#   panel.grid.minor.x = element_blank(),
+#   panel.grid.major.y = element_line(colour = "grey60", linetype = "dashed")
+#   )
+
+# vip(lasso, num_features = 25, geom = "point") + theme_bw()
+```
+
+
+
+## Cross-fold Descriptives
+
+```{r}
+predictions_lasso <- lasso[["pred"]]
+
+# Initialize an empty matrix to store results
+xv_results <- matrix(NA, nrow = 10, ncol = 7,
+                  dimnames = list(NULL, c("Fold", "AUC", "ACC", "PRE", "FPR", "TNR", "TPR")))
+
+# Loop through each fold
+for (i in 1:10) {
+ # Subset the predictions dataframe for the current fold
+ fold <- subset(predictions_lasso, Resample == paste0("Resample", sprintf("%02d", i)))
+ 
+ # Create confusion matrix
+ conf_matrix <- confusionMatrix(data = factor(fold$pred), reference = factor(fold$obs), 
+                                positive = "Yes")
+ 
+ # Extract the confusion matrix
+ cm <- conf_matrix$table
+ 
+ # Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+ TP <- cm[2, 2]
+ TN <- cm[1, 1]
+ FP <- cm[1, 2]
+ FN <- cm[2, 1]
+ 
+ # Calculate Accuracy
+ ACC <- (TP + TN) / sum(cm)
+ 
+ # Calculate Precision
+ PRE <- TP / (TP + FP)
+ 
+ # Calculate False Positive Rate (FPR)
+ FPR <- FP / (FP + TN)
+ 
+ # Calculate True Negative Rate (TNR)
+ TNR <- TN / (TN + FP)
+ 
+ # Calculate True Positive Rate (TPR)
+ TPR <- TP / (TP + FN)
+ 
+ # Calculate AUC using cutpointr
+ cut.obj <- cutpointr(x = fold$Yes, class = fold$obs)
+ AUC <- cutpointr::auc(cut.obj)
+ 
+ # Store results in the matrix
+ xv_results[i, ] <- c(i, AUC, ACC, PRE, FPR, TNR, TPR)
+}
+
+# Print the results matrix
+xv_results_lasso <- as.data.frame(xv_results)
+
+# Columns to calculate means and standard deviations for
+columns_of_interest <- c("AUC", "ACC", "PRE", "FPR", "TNR", "TPR")
+
+# Create empty vectors to store results
+means <- numeric(length(columns_of_interest))
+std_devs <- numeric(length(columns_of_interest))
+
+# Loop through each column
+for (i in seq_along(columns_of_interest)) {
+  # Calculate mean for each column and round to the second decimal point
+  means[i] <- round(mean(xv_results_lasso[[columns_of_interest[i]]]), 2)
+  
+  # Calculate standard deviation for each column and round to the second decimal point
+  std_devs[i] <- round(sd(xv_results_lasso[[columns_of_interest[i]]]), 2)
+}
+
+# Combine results into a dataframe
+result_df <- data.frame(Column = columns_of_interest,
+                        Mean = means,
+                        StdDev = std_devs)
+
+print(result_df)
+```
+
+
+# Elastic
+
+```{r}
+set.seed(10312022)
+
+# Create the tuning grid
+grid <- expand.grid(alpha = seq(0, 1, .10), lambda = seq(0,.5,.001))
+
+# Train elastic net model
+elastic <- train(blueprint,
+                 data = dat,
+                 method = "glmnet",
+                 family = 'binomial',
+                 trControl = cv,
+                 tuneGrid = grid)
+
+# plot(elastic)
+elastic$bestTune
+
+elasticalpha <- elastic[["bestTune"]][["alpha"]]
+elasticlamb <- elastic[["bestTune"]][["lambda"]]
+
+# Create the tuning grid
+grid <- expand.grid(alpha = elasticalpha, lambda = elasticlamb)
+
+# Train elastic net model
+elastic <- train(blueprint,
+                 data = dat,
+                 method = "glmnet",
+                 family = 'binomial',
+                 trControl = cv,
+                 tuneGrid = grid)
+
+pred <- elastic$pred$pred
+obs <- elastic$pred$obs
+
+###########
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), "Yes")
+
+# Extract the confusion matrix
+cm <- conf_matrix$table
+
+# Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+TP <- cm[2, 2]
+TN <- cm[1, 1]
+FP <- cm[1, 2]
+FN <- cm[2, 1]
+
+# Calculate Accuracy
+elastic_ACC <- (TP + TN) / sum(cm)
+
+# Calculate Precision
+elastic_PRE <- TP / (TP + FP)
+
+# Calculate False Positive Rate (FPR)
+elastic_FPR <- FP / (FP + TN)
+
+# Calculate True Negative Rate (TNR)
+elastic_TNR <- TN / (TN + FP)
+
+# Calculate True Positive Rate (TPR)
+elastic_TPR <- TP / (TP + FN)
+
+# Calculate AUC
+cut.obj <- cutpointr(x = elastic$pred$Yes,
+                     class = elastic$pred$obs)
+elastic_AUC = cutpointr::auc(cut.obj)
+
+# Print the results
+print(paste("Area Under Curve (AUC):", elastic_AUC))
+print(paste("Accuracy:", elastic_ACC))
+print(paste("Precision:", elastic_PRE))
+print(paste("False Positive Rate (FPR):", elastic_FPR))
+print(paste("True Negative Rate (TNR):", elastic_TNR))
+print(paste("True Positive Rate (TPR):", elastic_TPR))
+
+# coefs <- coef(elastic$finalModel, elastic$bestTune$lambda)
+# ind   <- order(abs(coefs[,1]),decreasing=T)
+# head(as.matrix(coefs[ind,]),20)
+# 
+# vip(elastic, num_features = 25, geom = "point") + theme_bw()
+```
+
+
+## Cross-fold Descriptives
+
+```{r}
+predictions_elastic <- elastic[["pred"]]
+
+# Initialize an empty matrix to store results
+xv_results <- matrix(NA, nrow = 10, ncol = 7,
+                  dimnames = list(NULL, c("Fold", "AUC", "ACC", "PRE", "FPR", "TNR", "TPR")))
+
+# Loop through each fold
+for (i in 1:10) {
+ # Subset the predictions dataframe for the current fold
+ fold <- subset(predictions_elastic, Resample == paste0("Resample", sprintf("%02d", i)))
+ 
+ # Create confusion matrix
+ conf_matrix <- confusionMatrix(data = factor(fold$pred), reference = factor(fold$obs), 
+                                positive = "Yes")
+ 
+ # Extract the confusion matrix
+ cm <- conf_matrix$table
+ 
+ # Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+ TP <- cm[2, 2]
+ TN <- cm[1, 1]
+ FP <- cm[1, 2]
+ FN <- cm[2, 1]
+ 
+ # Calculate Accuracy
+ ACC <- (TP + TN) / sum(cm)
+ 
+ # Calculate Precision
+ PRE <- TP / (TP + FP)
+ 
+ # Calculate False Positive Rate (FPR)
+ FPR <- FP / (FP + TN)
+ 
+ # Calculate True Negative Rate (TNR)
+ TNR <- TN / (TN + FP)
+ 
+ # Calculate True Positive Rate (TPR)
+ TPR <- TP / (TP + FN)
+ 
+ # Calculate AUC using cutpointr
+ cut.obj <- cutpointr(x = fold$Yes, class = fold$obs)
+ AUC <- cutpointr::auc(cut.obj)
+ 
+ # Store results in the matrix
+ xv_results[i, ] <- c(i, AUC, ACC, PRE, FPR, TNR, TPR)
+}
+
+# Print the results matrix
+xv_results_elastic <- as.data.frame(xv_results)
+
+# Columns to calculate means and standard deviations for
+columns_of_interest <- c("AUC", "ACC", "PRE", "FPR", "TNR", "TPR")
+
+# Create empty vectors to store results
+means <- numeric(length(columns_of_interest))
+std_devs <- numeric(length(columns_of_interest))
+
+# Loop through each column
+for (i in seq_along(columns_of_interest)) {
+  # Calculate mean for each column and round to the second decimal point
+  means[i] <- round(mean(xv_results_elastic[[columns_of_interest[i]]]), 2)
+  
+  # Calculate standard deviation for each column and round to the second decimal point
+  std_devs[i] <- round(sd(xv_results_elastic[[columns_of_interest[i]]]), 2)
+}
+
+# Combine results into a dataframe
+result_df <- data.frame(Column = columns_of_interest,
+                        Mean = means,
+                        StdDev = std_devs)
+
+print(result_df)
+```
+
+
+# Random Forest
+
+## Tune
+
+```{r tune}
+# Define the grid of values for mtry, num.trees, and min.node.size
+mtry_values <- c(13:14)
+num_trees <- c(seq(500,800, 50))
+min_node_size_values <- c(15:22)
+
+num_combinations <- length(mtry_values) * length(num_trees) * length(min_node_size_values)
+results_matrix <- matrix(NA, nrow = num_combinations, ncol = 4,
+                         dimnames = list(NULL, c("mtry", "num.trees", "min.node.size", "Accuracy")))
+
+set.seed(10312022)
+
+index <- 1
+
+for (i in seq_along(mtry_values)) {
+ for (j in seq_along(num_trees)) {
+  for (k in seq_along(min_node_size_values)) {
+   grid <- expand.grid(
+    mtry = mtry_values[i],
+    splitrule = 'gini',
+    min.node.size = min_node_size_values[k]
+   )
+   
+   rforest <- train(blueprint,
+                    data = dat,
+                    method = 'ranger',
+                    trControl = cv,
+                    tuneGrid = grid,
+                    num.trees = num_trees[j],
+                    replace = TRUE,
+                    sample.fraction = 0.8,
+                    max.depth = 10,
+                    importance = 'impurity'
+   )
+   
+   results_matrix[index, 1] <- mtry_values[i]
+   results_matrix[index, 2] <- num_trees[j]
+   results_matrix[index, 3] <- min_node_size_values[k]
+   results_matrix[index, 4] <- rforest$results$Accuracy
+   
+   index <- index + 1
+  }
+ }
+}
+
+# Find the row index with the minimum logLoss
+max_Accuracy_row1 <- which.max(results_matrix[, "Accuracy"])
+
+best_model_values1 <- results_matrix[max_Accuracy_row1, ]
+
+print(best_model_values1)
+```
+
+### Refine Tune 1
+Varied max depth, 8 had highest accuracy.
+
+```{r}
+# Set seed for reproducibility
+set.seed(10312022)
+
+# Define the parameter grid
+grid <- expand.grid(
+  mtry = 13,
+  min.node.size = 17,
+  splitrule = 'gini'
+)
+
+# Number of depths to iterate over
+max_depths <- c(2:30)
+
+# Results matrix to store evaluation metrics
+results <- matrix(NA, nrow = length(max_depths), ncol = 7,
+                  dimnames = list(NULL, c("Max_Depth", "Accuracy", "AUC", "Precision", 
+                                          "TNR", "TPR", "FPR")))
+
+# Loop over different max depths
+for (i in seq_along(max_depths)) {
+  # Train the model with specified parameters
+  rforest <- caret::train(
+    blueprint,
+    data = dat,
+    method = 'ranger',
+    tuneGrid = grid,
+    trControl = cv,
+    num.trees = 700,
+    replace = TRUE,
+    sample.fraction = 0.8,
+    max.depth = max_depths[i],
+    importance = 'impurity'
+  )
+
+  obs <- rforest$pred$obs
+  pred <- rforest$pred$pred
+
+  # Create confusion matrix
+  conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), positive = "Yes")
+
+  # Extract the confusion matrix
+  cm <- conf_matrix$table
+
+  # Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+  TP <- cm[2, 2]
+  TN <- cm[1, 1]
+  FP <- cm[1, 2]
+  FN <- cm[2, 1]
+
+  # Calculate Accuracy
+  accuracy <- (TP + TN) / sum(cm)
+
+  # Calculate Precision
+  precision <- TP / (TP + FP)
+
+  # Calculate False Positive Rate (FPR)
+  FPR <- FP / (FP + TN)
+
+  # Calculate True Negative Rate (TNR)
+  TNR <- TN / (TN + FP)
+
+  # Calculate True Positive Rate (TPR)
+  TPR <- TP / (TP + FN)
+
+  # Calculate AUC
+  cut.obj <- cutpointr::cutpointr(x = rforest$pred$Yes,
+                                  class = rforest$pred$obs)
+  AUC <- cutpointr::auc(cut.obj)
+
+  # Store results in the results matrix
+  results[i, ] <- c(max_depths[i], accuracy, AUC, precision, TNR, TPR, FPR)
+}
+
+# View results
+print(results)
+
+max_Accuracy_row2 <- which.max(results[, "Accuracy"])
+
+best_model_values2 <- results[max_Accuracy_row2, ]
+
+print(best_model_values2)
+```
+
+
+### Refine Tune 2
+Used smaller tree intervals to finalize n (using the other parameters identified above). Decreased to 690 as fit was the same.
+
+```{r}
+# Set the seed for reproducibility
+set.seed(10312022)
+
+# Define the grid of values for mtry, num.trees, and min.node.size
+mtry_values <- 13
+num_trees <- seq(655, 745, 5)
+min_node_size_values <- 17
+
+num_combinations <- length(mtry_values) * length(num_trees) * length(min_node_size_values)
+results_matrix2 <- matrix(NA, nrow = num_combinations, ncol = 4,
+                         dimnames = list(NULL, c("mtry", "num.trees", "min.node.size", "Accuracy")))
+
+index <- 1
+
+for (i in seq_along(mtry_values)) {
+ for (j in seq_along(num_trees)) {
+  for (k in seq_along(min_node_size_values)) {
+   grid <- expand.grid(
+    mtry = mtry_values[i],
+    splitrule = 'gini',
+    min.node.size = min_node_size_values[k]
+   )
+   
+   rforest <- train(blueprint,
+                    data = dat,
+                    method = 'ranger',
+                    trControl = cv,
+                    tuneGrid = grid,
+                    num.trees = num_trees[j],
+                    replace = TRUE,
+                    sample.fraction = 0.8,
+                    max.depth = 8,
+                    importance = 'impurity'
+   )
+   
+   results_matrix2[index, 1] <- mtry_values[i]
+   results_matrix2[index, 2] <- num_trees[j]
+   results_matrix2[index, 3] <- min_node_size_values[k]
+   results_matrix2[index, 4] <- rforest$results$Accuracy
+   
+   index <- index + 1
+  }
+ }
+}
+
+# Find the row index with the minimum logLoss
+max_Accuracy_row3 <- which.max(results_matrix2[, "Accuracy"])
+
+# Get the values (mtry, num.trees, min.node.size, logLoss) for the row with the lowest logLoss
+best_model_values3 <- results_matrix2[max_Accuracy_row3, ]
+
+print(best_model_values3)
+```
+
+
+
+## Final Model
+
+```{r bestmodel}
+# Set seed for reproducibility
+set.seed(10312022)
+
+# Define the parameter grid
+grid <- expand.grid(
+  mtry = 13,
+  min.node.size = 17,
+  splitrule = 'gini'
+)
+
+# Train the final model with optimal parameters
+rforest <- caret::train(
+  blueprint,
+  data = dat,
+  method = 'ranger',
+  trControl = cv,
+  tuneGrid = grid,
+  num.trees = 700,
+  replace = TRUE,
+  sample.fraction = 0.8,
+  max.depth = 8,
+  importance = 'permutation',
+  scale.permutation.importance = T)
+
+perm <- as.data.frame(rforest[["finalModel"]][["variable.importance"]])
+
+perm$variable <- rownames(perm)
+rownames(perm) <- NULL
+
+# Set seed for reproducibility
+set.seed(10312022)
+
+# Define the parameter grid
+grid <- expand.grid(
+  mtry = 13,
+  min.node.size = 17,
+  splitrule = 'gini')
+
+rforest <- caret::train(
+  blueprint,
+  data = dat,
+  method = 'ranger',
+  trControl = cv,
+  tuneGrid = grid,
+  num.trees = 700,
+  replace = TRUE,
+  sample.fraction = 0.8,
+  max.depth = 8,
+  importance = 'impurity'
+)
+
+gini <- as.data.frame(rforest[["finalModel"]][["variable.importance"]])
+
+gini$variable <- rownames(gini)
+rownames(gini) <- NULL
+
+# Obtain predictions
+obs <- rforest$pred$obs
+pred <- rforest$pred$pred
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), positive = "Yes")
+
+# Extract the confusion matrix
+cm <- conf_matrix$table
+
+# Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+TP <- cm[2, 2]
+TN <- cm[1, 1]
+FP <- cm[1, 2]
+FN <- cm[2, 1]
+
+# Calculate Accuracy
+rforest_ACC <- (TP + TN) / sum(cm)
+
+# Calculate Precision
+rforest_PRE <- TP / (TP + FP)
+
+# Calculate False Positive Rate (FPR)
+rforest_FPR <- FP / (FP + TN)
+
+# Calculate True Negative Rate (TNR)
+rforest_TNR <- TN / (TN + FP)
+
+# Calculate True Positive Rate (TPR)
+rforest_TPR <- TP / (TP + FN)
+
+# Calculate AUC
+cut.obj <- cutpointr(x = rforest$pred$Yes,
+                     class = rforest$pred$obs)
+rforest_AUC = cutpointr::auc(cut.obj)
+
+# Print the results
+print(paste("Area Under Curve (AUC):", rforest_AUC))
+print(paste("Accuracy:", rforest_ACC))
+print(paste("Precision:", rforest_PRE))
+print(paste("False Positive Rate (FPR):", rforest_FPR))
+print(paste("True Negative Rate (TNR):", rforest_TNR))
+print(paste("True Positive Rate (TPR):", rforest_TPR))
+```
+
+
+### Cross-fold Descriptives
+```{r}
+predictions <- rforest[["pred"]]
+
+# Initialize an empty matrix to store results
+xv_results <- matrix(NA, nrow = 10, ncol = 7,
+                  dimnames = list(NULL, c("Fold", "AUC", "ACC", "PRE", "FPR", "TNR", "TPR")))
+
+# Loop through each fold
+for (i in 1:10) {
+ # Subset the predictions dataframe for the current fold
+ fold <- subset(predictions, Resample == paste0("Resample", sprintf("%02d", i)))
+ 
+ # Create confusion matrix
+ conf_matrix <- confusionMatrix(data = factor(fold$pred), reference = factor(fold$obs), positive = "Yes")
+ 
+ # Extract the confusion matrix
+ cm <- conf_matrix$table
+ 
+ # Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+ TP <- cm[2, 2]
+ TN <- cm[1, 1]
+ FP <- cm[1, 2]
+ FN <- cm[2, 1]
+ 
+ # Calculate Accuracy
+ ACC <- (TP + TN) / sum(cm)
+ 
+ # Calculate Precision
+ PRE <- TP / (TP + FP)
+ 
+ # Calculate False Positive Rate (FPR)
+ FPR <- FP / (FP + TN)
+ 
+ # Calculate True Negative Rate (TNR)
+ TNR <- TN / (TN + FP)
+ 
+ # Calculate True Positive Rate (TPR)
+ TPR <- TP / (TP + FN)
+ 
+ # Calculate AUC using cutpointr
+ cut.obj <- cutpointr(x = fold$Yes, class = fold$obs)
+ AUC <- auc(cut.obj)
+ 
+ # Store results in the matrix
+ xv_results[i, ] <- c(i, AUC, ACC, PRE, FPR, TNR, TPR)
+}
+
+# Print the results matrix
+xv_results <- as.data.frame(xv_results)
+
+# Calculate mean and standard deviation and round to the second decimal point
+mean_values <- sapply(xv_results[, -1], function(x) round(mean(x), 2))
+sd_values <- sapply(xv_results[, -1], function(x) round(sd(x), 2))
+
+# Print mean and standard deviation
+cat("Mean:\n")
+print(mean_values)
+cat("\nStandard Deviation:\n")
+print(sd_values)
+```
+
+
+## Global
+### Gini Impurity
+
+```{r}
+imp <- gini %>%
+ mutate(impurity = `rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ dplyr::select(-`rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ arrange(desc(impurity)) %>% 
+ dplyr::select(variable, impurity) %>% 
+ slice_head(n = 10)
+
+impvars <- c("Negative peer influence", 
+             "Drug use susceptibility",
+             "Intoxicated driving",
+             "Alocohol use disorder",
+             "Alcohol use susceptibility",
+             "Fight avoidance",
+             "Parent support",
+             "Community violence",
+             "Retaliation attitudes")
+
+imp <- cbind(imp, impvars)
+
+imp <- imp %>%
+ relocate(impvars) %>% 
+ dplyr::select(-variable)
+ 
+giniimp <- imp %>%
+ ggplot(aes(x = impurity, y = reorder(impvars, impurity))) +
+ geom_segment(aes(yend = impvars), xend = 0, colour = "grey50") +
+ geom_point(size = 3.5) + 
+ labs(x = "Gini Impurity", y = "",
+      title = "") +
+ scale_x_continuous(limits = c(0, 20)) +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+  axis.text.y = element_text(size = 11),
+  axis.title.x = element_text(size = 12))
+```
+
+### Variable Permutation
+
+```{r}
+imp2 <- perm %>%
+ mutate(permimp = `rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ dplyr::select(-`rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ arrange(desc(permimp)) %>% 
+ dplyr::select(variable, permimp) %>% 
+ slice_head(n = 10)
+
+impvars2 <- c("Intoxicated driving",
+              "Negative peer influence",
+              "Alcohol use disorder",
+              "Drug use susceptibility",
+              "Conduct Disorder or anti-social\npersonality disorder",
+              "Biological sex",
+              "Depression symptoms",
+              "Alcohol use susceptibility",
+              "Non-Parnter violence perpetration")
+
+imp2 <- cbind(impvars2,imp2)
+
+# modparts2 <- modparts %>%
+#  dplyr::filter(variable != "_baseline_", variable != "_full_model_", permutation != 0) %>%
+#  group_by(variable) %>%
+#  mutate(mean = mean(dropout_loss), min = min(dropout_loss), max = max(dropout_loss)) %>%
+#  ungroup() %>%
+#  arrange(desc(mean)) %>%
+#  mutate(rank = rank(-mean)) %>%
+#  dplyr::select(-dropout_loss, -permutation) %>% 
+#  unique() %>% 
+#  slice_head(n = 10)
+# 
+# modparts2 <- cbind(modparts2,impvars2)
+# 
+# permimp <- modparts2 %>% 
+#  ggplot(aes(x = mean, y = reorder(impvars2, mean), group = impvars2)) +
+#  geom_errorbarh(aes(xmax = min, xmin = max), height=0, size = 1.5) +
+#  geom_point(shape = 23, fill = "white", size = 3.5) +
+#  labs (x = "1-AUC", y = "") +
+#  theme_bw() +
+#  theme(axis.text.x = element_text(size = 11),
+#  axis.text.y = element_text(size = 11),
+#  axis.title.x = element_text(size = 12))
+
+permimp <- imp2 %>%
+ ggplot(aes(x = permimp, y = reorder(impvars2, permimp))) +
+ geom_segment(aes(yend = impvars2), xend = 0, colour = "grey50") +
+ geom_point(size = 3.5) + 
+ labs(x = "Permutation", y = "",
+      title = "") +
+ scale_x_continuous(limits = c(0, 22)) +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+  axis.text.y = element_text(size = 11),
+  axis.title.x = element_text(size = 12))
+
+##################
+
+imp_plot <- giniimp + permimp + plot_layout(nrow = 2, byrow = TRUE) +
+ plot_annotation(tag_levels = 'A')
+
+##################
+
+# impvarsnew <- c(imp$impvars,imp2$impvars2)
+# impvalues <- c(imp$impurity, imp2$permimp)
+# type <- c(rep("Gini",10), rep("Permutation",10))
+# 
+# impmerge <- as.data.frame(cbind(impvarsnew, impvalues, type))
+# 
+# impmerge %>%
+#  ggplot(aes(x = impvalues, y = reorder(impvarsnew, impvalues), group = type)) +
+#  geom_segment(aes(yend = impvarsnew), xend = 0, colour = "grey50") +
+#  geom_point(size = 3.5) + 
+#  facet_grid(type~.) +
+#  labs(x = "", y = "",
+#       title = "") +
+#  theme_bw() +
+#  theme(axis.text.x = element_text(size = 11),
+#   axis.text.y = element_text(size = 11),
+#   axis.title.x = element_text(size = 12))
+```
+
+
+
+### Importance Together
+```{r}
+gini2 <- gini %>%
+ mutate(outcome = `rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ dplyr::select(-`rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ arrange(desc(outcome)) %>% 
+ dplyr::select(variable, outcome) %>% 
+ mutate(type = "Impurity")
+
+perm2 <- perm %>%
+ mutate(outcome = `rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ dplyr::select(-`rforest[["finalModel"]][["variable.importance"]]`) %>% 
+ arrange(desc(outcome)) %>% 
+ dplyr::select(variable, outcome) %>% 
+ mutate(type = "Permutation")
+
+importance <- rbind(gini2,perm2)
+
+importance <- importance %>% 
+ pivot_wider(names_from = type, values_from = outcome) %>% 
+ arrange(desc(Impurity)) %>% 
+ mutate(ginirank = row_number()) %>% 
+ arrange(desc(Permutation)) %>% 
+ mutate(permrank = row_number()) %>% 
+ mutate(selectrank = ifelse(ginirank <= 8 | permrank <= 8, 1, 0)) %>% 
+ arrange(desc(Impurity)) %>% 
+ dplyr::select(-ginirank, -permrank) %>%
+ pivot_longer(cols = c(Impurity, Permutation),
+               names_to = "type",
+               values_to = "outcome") %>% 
+ arrange(type, desc(outcome)) %>% 
+ group_by(type) %>% 
+ mutate(rank = rank(-outcome)) %>% 
+ ungroup() %>% 
+ dplyr::filter(selectrank==1)
+
+impvars <- c("Negative peer influence", 
+             "Drug refusal efficacy",
+             "Intoxicated driving",
+             "Alcohol use disorder",
+             "Alcohol refusal efficacy",
+             "Depression symptoms",
+             "Fight avoidance",
+             "Parent support",
+             "Conduct disorder or anti-social\npersonality disorder",
+             "Biological sex",
+             "Intoxicated driving",
+             "Negative peer influence",
+             "Alcohol use disorder",
+             "Drug refusal efficacy",
+             "Conduct disorder or anti-social\npersonality disorder",
+             "Biological sex",
+             "Alcohol refusal efficacy",
+             "Depression symptoms",
+             "Fight avoidance",
+             "Parent support")
+
+importance <- cbind(importance, impvars)
+
+arrangement <- importance %>% 
+ filter(type == "Permutation") %>% 
+ select(variable, rank) %>% 
+ mutate(arrange = row_number()) %>% 
+ select(-rank)
+
+importance <- merge(importance, arrangement)
+
+imp_plot <- importance %>%
+ select(impvars, everything()) %>%
+ mutate(type = factor(type, levels = c("Impurity", "Permutation"))) %>%
+ ggplot(aes(x = outcome, y = reorder(impvars, desc(arrange)), fill = type)) +
+ geom_col(position = "dodge", width = .75) +
+ geom_text(aes(label = rank), 
+           hjust = -.01, 
+           position = position_dodge(width = 0.9), 
+           color = "black", 
+           size = 3) +
+ labs(fill = "", x = "Importance", y = "") +
+ guides(fill = guide_legend(reverse = TRUE)) +
+ scale_fill_manual(values = c("darkorchid4", "#6ec6ca")) +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+  axis.text.y = element_text(size = 10),
+  axis.title.x = element_text(size = 12),
+  legend.position = c(0.95, 0.025),  # Adjust position within the plot grid
+  legend.justification = c(1, 0),
+  legend.background = element_blank(),
+  legend.box.background = element_blank(),
+  legend.key = element_blank())
+```
+
+
+
+### ALEs
+
+```{r}
+# Create DALEX explainer object
+fitted_rf_model <- rforest$finalModel
+
+prepped_recipe <- prep(blueprint, training = dat)
+baked <- bake(prepped_recipe, new_data = dat)
+
+target <- as.numeric(baked$drugdx) - 1
+
+explainer_rf <- DALEX::explain(fitted_rf_model, data = baked[,3:47],
+                        y = target)
+
+# ALEs
+mp <- model_profile(explainer = explainer_rf, type = "conditional", N = NULL,
+                     variables = c("infrndng", "sedare", "dui", "sedarea", 
+                                    "nofight","parntsup", "bsi"))
+
+agr_profiles <- mp[["agr_profiles"]]
+
+npi_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "infrndng") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = infrndng), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Negative Peer Influence", y = "", title = "") +
+ scale_y_continuous(limits = c(.35, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+
+dre_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "sedare") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = sedare), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Drug Refusal Efficacy", y = "", title = "") +
+ scale_y_continuous(limits = c(.35, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+dui_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "dui") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = dui), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Intoxicated Driving", y = "", title = "") +
+ scale_y_continuous(limits = c(.35, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+are_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "sedarea") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = sedarea), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Alcohol Refusal Efficacy", y = "",title = "") +
+ scale_y_continuous(limits = c(.35, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+fa_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "nofight") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = nofight), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Fight Avoidance", y = "", title = "") +
+ scale_y_continuous(limits = c(.35, .85), 
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+ps_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "parntsup") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = parntsup), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Parent Support", y = "", title = "") +
+ scale_y_continuous(limits = c(.35, .85), 
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+
+# cv_imp <- agr_profiles %>% 
+#  dplyr::filter(`_vname_` == "commviol") %>%
+#  ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+#  geom_line(color = "#6ec6ca", linewidth = 1.5) +
+#  geom_rug(data = dat, aes(x = commviol), sides="b", alpha = .15, linewidth = 1.25, 
+#           inherit.aes = FALSE, length = unit(0.15,"cm")) +
+#  labs(x = "Community Violence", y = "", title = "") +
+#  scale_y_continuous(limits = c(.35, .85),
+#                     expand = expansion(mult = c(0, 0.05)),
+#                     labels = function(x) {format(x, nsmall = 2)}) +
+#  theme_bw() +
+#  theme(legend.position = "none",
+#        axis.text.x = element_text(size = 11),
+#        axis.text.y = element_text(size = 11),
+#        plot.title = element_text(size = 11),
+#        axis.title.x = element_text(size = 12))
+# 
+# rt_imp <- agr_profiles %>% 
+#  dplyr::filter(`_vname_` == "reatt_rev") %>%
+#  ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+#  geom_line(color = "#6ec6ca", linewidth = 1.5) +
+#  geom_rug(data = dat, aes(x = reatt_rev), sides="b", alpha = .15, linewidth = 1.25, 
+#           inherit.aes = FALSE, length = unit(0.15,"cm")) +
+#  labs(x = "Retaliation Attitudes", y = "", title = "") +
+#  scale_y_continuous(limits = c(.35, .85),
+#                     expand = expansion(mult = c(0, 0.05)),
+#                     labels = function(x) {format(x, nsmall = 2)}) +
+#  theme_bw() +
+#  theme(legend.position = "none",
+#        axis.text.x = element_text(size = 11),
+#        axis.text.y = element_text(size = 11),
+#        plot.title = element_text(size = 11),
+#        axis.title.x = element_text(size = 12))
+
+bsi_imp <- agr_profiles %>% 
+ dplyr::filter(`_vname_` == "bsi") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_line(color = "#6ec6ca", linewidth = 1.5) +
+ geom_rug(data = dat, aes(x = bsi), sides="b", alpha = .15, linewidth = 1.25, 
+          inherit.aes = FALSE, length = unit(0.15,"cm")) +
+ labs(x = "Depression Symptoms", y = "", title = "") +
+ scale_y_continuous(limits = c(.35, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+# imp11 <- agr_profiles %>% 
+#  dplyr::filter(`_vname_` == "infrndps") %>%
+#  ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+#  geom_line(color = "#6ec6ca", linewidth = 1.5) + 
+#  geom_point(aes(x = infrndps, y = .35), data = dat, shape = 0, 
+#             size = 4, color = "black") +
+#  geom_point(aes(x = infrndps, y = .35), data = dat, alpha = 0.05, shape = 15, 
+#             size = 4, fill = "black") +
+#  labs(x = "Positive Peer Influence", y = "", title = "") +
+#  scale_y_continuous(limits = c(.35, .85),
+#                     expand = expansion(mult = c(0, 0.05)),
+#                     labels = function(x) {format(x, nsmall = 2)}) +
+#  theme_bw() +
+#  theme(legend.position = "none",
+#        axis.text.x = element_text(size = 11),
+#        axis.text.y = element_text(size = 11),
+#        plot.title = element_text(size = 11),
+#        axis.title.x = element_text(size = 12))
+
+# npvp_imp <- agr_profiles %>% 
+#  dplyr::filter(`_vname_` == "npects1to13") %>%
+#  ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+#  geom_line(color = "#6ec6ca", linewidth = 1.5) + 
+#  geom_rug(data = dat, aes(x = npects1to13), sides="b", alpha = .15, linewidth = 1.25, 
+#           inherit.aes = FALSE, length = unit(0.15,"cm")) +
+#  labs(x = "Non-Partner Violence Perpetration", y = "", title = "") +
+#  scale_y_continuous(limits = c(.35, .85),
+#                     expand = expansion(mult = c(0, 0.05)),
+#                     labels = function(x) {format(x, nsmall = 2)}) +
+#  theme_bw() +
+#  theme(legend.position = "none",
+#        axis.text.x = element_text(size = 11),
+#        axis.text.y = element_text(size = 11),
+#        plot.title = element_text(size = 11),
+#        axis.title.x = element_text(size = 12))
+
+
+mp2 <- model_profile(explainer = explainer_rf, type = "conditional", N = NULL,
+                     variable_type = "categorical", 
+                     variables = c("alcdx", "demosex", "cdapd"))
+
+agr_profiles2 <- mp2[["agr_profiles"]]
+
+aud_imp <- agr_profiles2 %>%
+ dplyr::filter(`_vname_` == "alcdx") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_col(color = "black",fill = "#6ec6ca", width = .5) +
+ scale_y_continuous(limits = c(.00, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ labs(x = "Alcohol Use Disorder", y = "", title = "") +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+sex_imp <- agr_profiles2 %>%
+ dplyr::filter(`_vname_` == "demosex") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_col(color = "black",fill = "#6ec6ca", width = .5) +
+ scale_y_continuous(limits = c(.00, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ labs(x = "Biological Sex", y = "", title = "") +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+
+cdapd_imp <- agr_profiles2 %>%
+ dplyr::filter(`_vname_` == "cdapd") %>%
+ ggplot(aes(x = `_x_`, y = `_yhat_`)) +
+ geom_col(color = "black",fill = "#6ec6ca", width = .5) +
+ scale_y_continuous(limits = c(.00, .85),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ labs(x = "Conduct Disorder or ASPD", y = "", title = "") +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(size = 11),
+       axis.title.x = element_text(size = 12))
+
+imp_patch <- dui_imp + npi_imp + aud_imp + dre_imp + cdapd_imp + sex_imp + 
+ are_imp + bsi_imp + fa_imp + ps_imp +
+ plot_layout(nrow = 5, byrow = TRUE) +
+ plot_annotation(tag_levels = 'A')
+
+imp_patch <- wrap_elements(imp_patch) +
+  labs(tag = "Predicted Probability") +
+  theme(plot.tag = element_text(size = rel(1.2), angle = 90),
+  plot.tag.position = "left")
+```
+
+
+```{r}
+tree_info_list <- list()
+
+# Loop through each tree in the forest
+for (i in 1:500) {
+  # Extract tree information using treeInfo() function
+  tree_info <- ranger::treeInfo(fitted_rf_model, tree = i)
+  
+  # Append tree information to the list
+  tree_info_list[[i]] <- tree_info
+}
+
+variable_freq <- list()
+
+# Loop through each tree information
+for (tree_info in tree_info_list) {
+  # Get the split variable names for the current tree
+  split_vars <- tree_info$splitvarName
+  
+  # Count the frequency of each variable name
+  for (i in 1:3) {
+    var_name <- split_vars[i]
+    if (is.null(variable_freq[[var_name]])) {
+      variable_freq[[var_name]] <- 1
+    } else {
+      variable_freq[[var_name]] <- variable_freq[[var_name]] + 1
+    }
+  }
+}
+
+# Combine the names and frequencies into a data frame
+roots <- data.frame(variable = names(variable_freq),
+                                 frequency = unlist(variable_freq))
+
+# Sort the data frame by frequency
+roots <- roots[order(-roots$frequency), ]
+
+# Print the sorted results
+print(roots)
+
+
+
+# Initialize a list to store the frequencies of variable splits from infrndng
+infrndng_splits <- list()
+
+# Loop through each tree information
+for (tree_info in tree_info_list) {
+  # Get the split variable names for the current tree
+  split_vars <- tree_info$splitvarName
+  
+  # Loop through each split in the tree
+  for (i in 1:(length(split_vars) - 1)) {  # -1 to avoid index out of bounds error
+    split_var <- split_vars[i]
+    
+    # Check if the split variable is 'infrndng'
+    if (!is.na(split_var) && split_var == "infrndng") {
+      # Get the next split variable after 'infrndng'
+      next_split_var <- split_vars[i + 1]
+      
+      # Count the frequency of the next split variable
+      if (!is.na(next_split_var)) {
+        if (is.null(infrndng_splits[[next_split_var]])) {
+          infrndng_splits[[next_split_var]] <- 1
+        } else {
+          infrndng_splits[[next_split_var]] <- infrndng_splits[[next_split_var]] + 1
+        }
+      }
+    }
+  }
+}
+
+# Combine the names and frequencies into a data frame
+infrndng_splits_df <- data.frame(variable = names(infrndng_splits),
+                                 frequency = unlist(infrndng_splits))
+
+# Sort the data frame by frequency
+infrndng_splits_sorted <- infrndng_splits_df[order(-infrndng_splits_df$frequency), ]
+
+# Print the sorted results
+print(infrndng_splits_sorted)
+```
+
+
+
+### Breakdown
+
+**Need to update ranges and breaks**
+
+```{r}
+predicted_baked <- predict(fitted_rf_model, baked[,3:47], type='response')
+predicted_baked <- as.data.frame(predicted_baked[["predictions"]])
+
+rand <- 599
+rand <- 55
+randpred <- round(predicted_baked$Yes[rand],3)
+
+bd_rfrand <- break_down(explainer_rf, baked[rand,3:47], check_interactions = FALSE,
+                        keep_distributions = TRUE)
+
+rand_contribution <- data.frame(variable_name = bd_rfrand[["variable_name"]],
+                                contribution = bd_rfrand[["contribution"]])
+
+rand_contribution <- rand_contribution %>%
+ mutate(contribution = round(contribution,3)) %>% 
+ arrange(desc(abs(contribution))) %>% 
+ filter(contribution != randpred) %>% 
+ slice_head(n = 10)
+
+rand_row <- data.frame(variable_name = "other variables", 
+                        contribution = randpred - sum(rand_contribution$contribution))
+
+rand_contribution <- rbind(rand_contribution, rand_row)
+
+labs <- c("Intercept",
+          "NPI",
+          "DUS",
+          "Sex",
+          "Intoxicated\ndriving",
+          "AUD",
+          "NPVV",
+          "Other\nvariables")
+
+rand_contribution <- rand_contribution %>%
+ mutate(contribution = round(contribution,3)) %>%
+ mutate(varname = labs) %>%
+ relocate(varname) %>%
+ dplyr::select(-variable_name)
+
+## Custom colors
+wf1 <- waterfall(rand_contribution, put_rect_text_outside_when_value_below = 1, 
+                 calc_total = T,
+                 total_rect_border_color = "black", total_rect_text_color = "black",
+                 total_rect_color = NA, rect_text_size = 1.5, total_axis_text = "Prediction",
+                 fill_by_sign = FALSE, fill_colours = c("#6ec6ca", "#6ec6ca", "#6ec6ca", 
+                                                 "darkorchid4", "darkorchid4", "darkorchid4",
+                                                 "#6ec6ca", "#6ec6ca")) +
+ scale_y_continuous(limits = c(0,1), breaks = c(.25, .50, .75, 1.0), 
+                    expand = expansion(mult = c(0, 0.05))) +
+ labs(title = "", x = "", y = "") +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.02, vjust = 0, size = rel(1), face = "bold")) +
+ coord_flip()
+
+coord_flip(xlim = NULL, ylim = NULL, expand = TRUE, clip = "on")
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[55,3:47], type = "break_down")
+bd_rf 
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = simulated_participant[1,3:47], 
+                       type = "break_down")
+bd_rf 
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[559,3:47], type = "break_down")
+bd_rf 
+plot(bd_rf)
+
+## CPs
+newob <- baked[rand,3:47]
+
+pred1 <- DALEX::predict_profile(explainer_rf, new_observation = newob, 
+                                variables = c("infrndng", "dui", "sedare", "nprcts1to13",
+                                              "anx", "parntsup"))
+
+p1_dui <- pred1 %>% 
+ dplyr::filter(`_vname_` == "dui") %>% 
+ ggplot(aes(x = dui, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 0, y = 0.6892439, size = 3, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Intoxicated Driving", y = "", title = "") +
+ scale_y_continuous(limits = c(.30, .80),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.03, vjust = 0, size = rel(1), face = "bold"))
+
+p1_npi <- pred1 %>% 
+ dplyr::filter(`_vname_` == "infrndng") %>% 
+ ggplot(aes(x = infrndng, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 2.57142857142857, y = 0.6892439, size = 3, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Negative Peer Influence (NPI)", y = "", title = "") +
+ scale_y_continuous(limits = c(.30, .80),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+   
+p1_dase <- pred1 %>% 
+ dplyr::filter(`_vname_` == "sedare") %>% 
+ ggplot(aes(x = sedare, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 1.625, y = 0.6892439, size = 3, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Drug Use Susceptibility (DUS)", y = "", title = "") +
+ scale_y_continuous(limits = c(.30, .80),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+p1_npvv <- pred1 %>% 
+ dplyr::filter(`_vname_` == "nprcts1to13") %>% 
+ ggplot(aes(x = nprcts1to13, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 6, y = 0.6892439, size = 3, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Non-Partner Violence Victimization (NPVV)", y = "", title = "") +
+ scale_x_continuous(breaks = seq(0, 13, by = 3)) +
+ scale_y_continuous(limits = c(.30, .80),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+pred12 <- DALEX::predict_profile(explainer_rf, new_observation = newob, 
+                                 variables = c("demosex", "alcdx"))
+
+p1_sex <- pred12 %>%
+  dplyr::filter(`_vname_` == "demosex") %>%
+  ggplot(aes(x = demosex, y = `_yhat_`, fill = factor(demosex))) +
+  geom_col(color = "black") +
+  scale_fill_manual(values = c("#6ec6ca", "darkorchid4")) +
+  labs(x = "Biological sex", y = "", title = "") +
+  scale_y_continuous(limits = c(.0, .80),
+                     expand = expansion(mult = c(0, 0.05)),
+                     labels = function(x) {format(x, nsmall = 2)}) +
+  theme_bw() +
+  theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+
+p1_aud <- pred12 %>%
+ dplyr::filter(`_vname_` == "alcdx") %>%
+ ggplot(aes(x = alcdx, y = `_yhat_`, fill = factor(alcdx))) +
+ geom_col(color = "black") +
+ scale_fill_manual(values = c("darkorchid4", "#6ec6ca")) +
+ scale_y_continuous(limits = c(0, 0.80),
+                    expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ labs(x = "Alcohol Use Disorder (AUD)", y = "", title = "") +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+
+patch <- p1_npi + p1_dase + p1_sex + p1_dui + p1_aud + p1_npvv + 
+ plot_layout(nrow = 3, byrow = TRUE)
+
+patch1 <- wf1 / patch + plot_layout(heights = c(1, 2)) + plot_annotation(tag_levels = 'A')
+
+wrap_elements(patch1) +
+  labs(tag = "Predicted Probability") +
+  theme(plot.tag = element_text(size = rel(1.2), angle = 90), plot.tag.position = "left")
+
+
+##########################################
+rand <- 126
+randpred <- round(predicted_baked$Yes[rand],3)
+
+explainer_rf <- DALEX::explain(fitted_rf_model, data = baked[,3:47], 
+                               y = baked$drugdx, label = "rf")
+
+bd_rfrand <- break_down(explainer_rf, baked[rand,3:47],
+                        check_interactions = FALSE,
+                        keep_distributions = TRUE)
+
+rand_contribution <- data.frame(variable_name = bd_rfrand[["variable_name"]],
+                                contribution = bd_rfrand[["contribution"]])
+
+rand_contribution <- rand_contribution %>%
+ mutate(contribution = round(contribution,3)) %>% 
+ arrange(desc(abs(contribution))) %>% 
+ filter(contribution != randpred) %>% 
+ slice_head(n = 7)
+
+rand_row <- data.frame(variable_name = "other variables", 
+                       contribution = randpred - sum(rand_contribution$contribution))
+
+rand_contribution <- rbind(rand_contribution, rand_row)
+
+labs <- c("Intercept",
+          "PPI",
+          "Conduct\ndisorder",
+          "DUS",
+          "NPI",
+          "Intoxicated\ndriving",
+          "AUD",
+          "Other\nvariables")
+
+rand_contribution <- rand_contribution %>%
+ mutate(contribution = round(contribution,3)) %>%
+ mutate(varname = labs) %>%
+ relocate(varname) %>%
+ dplyr::select(-variable_name)
+
+## Custom colors
+wf2 <- waterfall(rand_contribution, put_rect_text_outside_when_value_below = 1, calc_total = T,
+          total_rect_border_color = "black", total_rect_text_color = "black",
+          total_rect_color = NA, rect_text_size = 1.5, total_axis_text = "Prediction",
+          fill_by_sign = FALSE, fill_colours = c("#6ec6ca", "darkorchid4", "#6ec6ca", 
+                                                 "darkorchid4", "#6ec6ca", "darkorchid4",
+                                                 "darkorchid4", "darkorchid4")) +
+ scale_y_continuous(limits = c(0,1), breaks = c(.25, .50, .75, 1.0), 
+                    expand = expansion(mult = c(0, 0.05))) +
+ labs(title = "", x = "", y = "") +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.02, vjust = 0, size = rel(1), face = "bold"))
+
+## CPs
+newob2 <- baked[rand,3:47]
+
+ppipred <- predict_profile(explainer_rf,
+new_observation = newob2,
+variables = "infrndps")
+
+pred2 <- DALEX::predict_profile(explainer_rf, new_observation = newob2, 
+                                  variables = c("infrndps","infrndng", "dui", "sedare"))
+
+p2_ppi <- pred2 %>% 
+ dplyr::filter(`_vname_` == "infrndps") %>% 
+ ggplot(aes(x = infrndps, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 4, y = 0.4253593, size = 4, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Positive Peer Influence (PPI)", y = "", title = "") +
+ scale_y_continuous(limits = c(.40, 0.55), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+p2_dui <- pred2 %>% 
+ dplyr::filter(`_vname_` == "dui") %>% 
+ ggplot(aes(x = dui, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 0, y = 0.4253593, size = 4, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Intoxicated Driving", y = "", title = "") +
+ scale_y_continuous(limits = c(.40, 0.62), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.03, vjust = 0, size = rel(1), face = "bold"))
+
+p2_npi <- pred2 %>% 
+ dplyr::filter(`_vname_` == "infrndng") %>% 
+ ggplot(aes(x = infrndng, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 2.14285714285714, y = 0.4253593, size = 4, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Negative Peer Influence (NPI)", y = "", title = "") +
+ scale_y_continuous(limits = c(.40, 0.55), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+   
+p2_dase <- pred2 %>% 
+ dplyr::filter(`_vname_` == "sedare") %>% 
+ ggplot(aes(x = sedare, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = 1.125, y = 0.4253593, size = 4, fill = "darkorchid4", color = "darkorchid4") +
+ labs(x = "Drug Use Susceptibility (DUS)", y = "", title = "") +
+ scale_y_continuous(limits = c(0.40, 0.65), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+pred21 <- DALEX::predict_profile(explainer_rf, new_observation = newob2, 
+                                  variables = c("cdapd", "alcdx"))
+
+p2_cd <- pred21 %>%
+ dplyr::filter(`_vname_` == "cdapd") %>%
+ ggplot(aes(x = cdapd, y = `_yhat_`, fill = factor(cdapd))) +
+ geom_col(color = "black") +
+ scale_fill_manual(values = c("#6ec6ca", "darkorchid4")) +
+ labs(x = "Conduct Disorder", y = "", title = "") +
+ scale_y_continuous(limits = c(0, 0.45), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+
+p2_aud <- pred21 %>%
+ dplyr::filter(`_vname_` == "alcdx") %>%
+ ggplot(aes(x = alcdx, y = `_yhat_`, fill = factor(alcdx))) +
+ geom_col(color = "black") +
+ scale_fill_manual(values = c("darkorchid4", "#6ec6ca")) +
+ scale_y_continuous(limits = c(0, 0.65), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ labs(x = "Alcohol Use Disorder (AUD)", y = "", title = "") +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+patch2 <- p2_ppi + p2_cd + p2_dase + p2_npi + p2_dui + p2_aud + plot_layout(nrow = 3, byrow = TRUE)
+
+patch3 <- wf2 / patch2 + plot_layout(heights = c(1, 2)) + plot_annotation(tag_levels = 'A')
+
+img2 <- wrap_elements(patch3) +labs(tag = "Predicted Probability") +
+  theme(plot.tag = element_text(size = rel(1.2), angle = 90),
+        plot.tag.position = "left")
+
+############
+# High
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[55,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot <- plot(bd_rf)
+
+
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[559,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[112,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+
+# Low
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[74,3:47], type = "break_down")
+bd_rf
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[191,3:47], type = "break_down")
+bd_rf
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[191,3:47], type = "break_down")
+bd_rf
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[402,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[371,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[492,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[126,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+bd_rf <- predict_parts(explainer = explainer_rf, new_observation = baked[75,3:47], type = "break_down")
+bd_rf %>% 
+ arrange(desc(abs(contribution)))
+plot(bd_rf)
+
+parts <- predict_parts(explainer = explainer_rf, new_observation = simulated_participant[1,3:47], 
+                       type = "break_down")
+plot <- plot(parts)
+
+parts <- data.frame(variable_name = plot[["data"]][["variable_name"]],
+                                contribution = plot[["data"]][["contribution"]])
+
+parts <- parts %>%
+ arrange(desc(abs(contribution))) 
+
+othersvars <- sum(rbind(parts[2,5], parts[9:13,2]))
+
+parts <- parts %>%
+ slice_head(n = 9)
+ 
+otherrow <- data.frame(variable_name = "other variables", 
+                       contribution = othersvars)
+
+labcon <- c("Intercept",
+          "NPI",
+          "DRE",
+          "Intoxicated Driving",
+          "PPI",
+          "Depression",
+          "Biological Sex",
+          "AUD",
+          "Parent Support",
+          "Family Anger",
+          "Retaliation",
+          "Other Variables",
+          "Total")
+
+newrow <- parts %>% 
+ filter(variable_name == "+ all other factors")
+
+parts <- parts %>%
+ filter(variable_name != "+ all other factors" & variable_name != "") %>% 
+ arrange(desc(abs(contribution))) %>% 
+ rbind(newrow) %>% 
+ mutate(contribution = round(contribution,3))
+
+parts <- rbind(parts_auxvars[2,], parts, parts_auxvars[1,])
+
+parts <- parts %>%
+ mutate(contribution = round(contribution,3)) %>%
+ arrange(abs(contribution)) %>% 
+ rbind(parts_auxvars[1,]) %>% 
+ mutate(contribution = round(contribution,3))
+ # mutate(varname = labcon) %>%
+ # relocate(varname) %>%
+ dplyr::select(-variable_name) %>% 
+ arrange(abs(contribution))
+
+## Custom colors
+wf2 <- waterfall(parts, put_rect_text_outside_when_value_below = 1, calc_total = T,
+          total_rect_border_color = "black", total_rect_text_color = "black",
+          total_rect_color = NA, rect_text_size = 1.5, total_axis_text = "Prediction",
+          fill_by_sign = TRUE) +
+ scale_y_continuous(limits = c(0,1), breaks = c(.25, .50, .75, 1.0), 
+                    expand = expansion(mult = c(0, 0.05))) +
+ coord_flip() +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.02, vjust = 0, size = rel(1), face = "bold"))
+
+```
+
+
+```{r}
+localpred <- predict(fitted_rf_model, baked[6,3:47], type='response')
+
+localpred <- round(localpred[["predictions"]][1, "Yes"],3)
+
+breakdown <- break_down(explainer_rf, baked[6,3:47], 
+                        check_interactions = FALSE,
+                        keep_distributions = TRUE)
+
+local_contribution <- data.frame(variable_name = breakdown[["variable_name"]],
+                                contribution = breakdown[["contribution"]])
+
+local_contribution <- local_contribution %>%
+ mutate(contribution = round(contribution,3)) %>% 
+ arrange(desc(abs(contribution))) %>% 
+ filter(variable_name != "") %>% 
+ slice_head(n = 9)
+
+new_row <- data.frame(variable_name = "other variables", 
+                       contribution = localpred - sum(local_contribution$contribution))
+
+local_contribution <- rbind(local_contribution, new_row)
+
+conlabs <- c("Intercept",
+          "NPI",
+          "Fight\navoidance",
+          "DRE",
+          "Sex",
+          "Intoxicated\ndriving",
+          "AUD",
+          "PPI",
+          "ARE",
+          "Other\nvariables")
+
+local_contribution <- local_contribution %>%
+ mutate(contribution = round(contribution,3)) %>%
+ mutate(varname = conlabs) %>%
+ relocate(varname) %>%
+ dplyr::select(-variable_name)
+
+## Custom colors
+wf <- waterfall(local_contribution, put_rect_text_outside_when_value_below = 1, calc_total = T,
+          total_rect_border_color = "black", total_rect_text_color = "black",
+          total_rect_color = NA, rect_text_size = 1.4, total_axis_text = "Prediction",
+          fill_by_sign = FALSE, fill_colours = c("#6ec6ca", "darkorchid4", "#6ec6ca", 
+                                                 "darkorchid4", "darkorchid4", "darkorchid4",
+                                                 "darkorchid4", "#6ec6ca",
+                                                 "darkorchid4", "darkorchid4")) +
+ scale_y_continuous(limits = c(0, .75), 
+                    breaks = c(.25, .50, .75), 
+                    expand = expansion(mult = c(0, 0.05))) +
+ labs(title = "", x = "", y = "") +
+ theme_bw() +
+ theme(axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11))
+
+#################
+obs <- baked[6,3:47]
+
+cp <- DALEX::predict_profile(explainer_rf, new_observation = obs, 
+                                  variables = c("infrndng", "nofight","sedare", "dui", 
+                                                "infrndps", "sedarea"))
+
+npi <- cp %>% 
+ dplyr::filter(`_vname_` == "infrndng") %>% 
+ ggplot(aes(x = infrndng, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = obs$infrndng, y = localpred, size = 3, 
+            color = "darkorchid4", shape = 18) +
+ labs(x = "Negative Peer Influence (NPI)", y = "", title = "") +
+ scale_y_continuous(limits = c(0, .6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+dre <- cp %>% 
+ dplyr::filter(`_vname_` == "sedare") %>% 
+ ggplot(aes(x = sedare, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = obs$sedare, y = localpred, size = 3, 
+            color = "darkorchid4", shape = 18) +
+ labs(x = "Drug Refusal Efficacy (DRE)", y = "", title = "") +
+ scale_y_continuous(limits = c(0, .6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.03, vjust = 0, size = rel(1), face = "bold"))
+
+dui <- cp %>% 
+ dplyr::filter(`_vname_` == "dui") %>% 
+ ggplot(aes(x = dui, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = obs$dui, y = localpred, size = 3, 
+            color = "darkorchid4", shape = 18) +
+ labs(x = "Intoxicated Driving", y = "", title = "") +
+ scale_y_continuous(limits = c(0, .6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+nofight <- cp %>% 
+ dplyr::filter(`_vname_` == "nofight") %>% 
+ ggplot(aes(x = nofight, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = obs$nofight, y = localpred, size = 3, 
+            color = "darkorchid4", shape = 18) +
+ labs(x = "Fight Avoidance", y = "", title = "") +
+ scale_y_continuous(limits = c(0, .6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+ppi <- cp %>% 
+ dplyr::filter(`_vname_` == "infrndps") %>% 
+ ggplot(aes(x = infrndps, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = obs$infrndps, y = localpred, size = 3, 
+            color = "darkorchid4", shape = 18) +
+ labs(x = "Positive Peer Influence (PPI)", y = "", title = "") +
+ scale_y_continuous(limits = c(0, .6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+are <- cp %>% 
+ dplyr::filter(`_vname_` == "sedarea") %>% 
+ ggplot(aes(x = sedarea, y = `_yhat_`)) +
+ geom_line(linewidth = 1.2, color = "#6ec6ca") +
+ geom_point(x = obs$sedarea, y = localpred, size = 3, 
+            color = "darkorchid4", shape = 18) +
+ labs(x = "Alcohol Refusal Efficacy (ARE)", y = "", title = "") +
+ scale_y_continuous(limits = c(0, .6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+cp2 <- DALEX::predict_profile(explainer_rf, new_observation = obs, 
+                                  variables = c("demosex", "alcdx"))
+
+demsex <- cp2 %>%
+ dplyr::filter(`_vname_` == "demosex") %>%
+ ggplot(aes(x = demosex, y = `_yhat_`, fill = factor(demosex))) +
+ geom_col(color = "black", width = .5) +
+ scale_fill_manual(values = c("#6ec6ca", "darkorchid4")) +
+ labs(x = "Biological Sex", y = "", title = "") +
+ scale_y_continuous(limits = c(0, 0.6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+
+aud <- cp2 %>%
+ dplyr::filter(`_vname_` == "alcdx") %>%
+ ggplot(aes(x = alcdx, y = `_yhat_`, fill = factor(alcdx))) +
+ geom_col(color = "black", width = .5) +
+ scale_fill_manual(values = c("darkorchid4", "#6ec6ca")) +
+ scale_y_continuous(limits = c(0, 0.6), expand = expansion(mult = c(0, 0.05)),
+                    labels = function(x) {format(x, nsmall = 2)}) +
+ labs(x = "Alcohol Use Disorder (AUD)", y = "", title = "") +
+ theme_bw() +
+ theme(legend.position = "none",
+       axis.text.x = element_text(size = 11),
+       axis.text.y = element_text(size = 11),
+       plot.title = element_text(hjust = -0.05, vjust = 0, size = rel(1), face = "bold"))
+
+cp_plots <- npi + nofight + dre + demsex + dui + aud + ppi + are + 
+ plot_layout(nrow = 4, byrow = TRUE)
+
+local <- wf / cp_plots + plot_layout(heights = c(.70, 2.3)) + plot_annotation(tag_levels = 'A') +
+ theme(plot.margin = c(0,0,0,0))
+
+local_patch <- wrap_elements(local) +labs(tag = "Predicted Probability") +
+  theme(plot.tag = element_text(size = rel(1.2), angle = 90),
+        plot.tag.position = "left")
+```
+
+
+# XGBoost
+
+```{r}
+set.seed(10312022)
+
+prepped_recipe <- prep(blueprint, training = dat)
+baked <- bake(prepped_recipe, new_data = dat)
+bakeddf <- baked %>%
+ select(1, 3:47)
+
+xgb_spec <- boost_tree(
+ trees = 1000,
+ tree_depth = tune(), min_n = tune(),
+ loss_reduction = tune(),
+ sample_size = tune(), mtry = tune(), 
+ learn_rate = tune()
+) %>%
+ set_engine("xgboost") %>%
+ set_mode("classification")
+
+xgb_grid <- grid_latin_hypercube(
+ tree_depth(),
+ min_n(),
+ loss_reduction(),
+ sample_size = sample_prop(),
+ finalize(mtry(), bakeddf),
+ learn_rate(),
+ size = 150 #step size
+)
+
+xgb_grid
+
+xgb_wf <- workflow() %>%
+ add_formula(drugdx ~ .) %>%
+ add_model(xgb_spec)
+
+xgb_wf
+
+set.seed(10312022)
+
+vb_folds <- vfold_cv(bakeddf)
+
+xgb_res <- tune_grid(
+ xgb_wf,
+ resamples = vb_folds,
+ grid = xgb_grid,
+ control = control_grid(save_pred = TRUE)
+)
+
+cm <- collect_metrics(xgb_res)
+show_best(xgb_res, "accuracy")
+best_acc <- select_best(xgb_res, "accuracy")
+best_acc
+
+final_xgb <- finalize_workflow(
+ xgb_wf,
+ best_acc
+)
+
+final_xgb
+
+finxgb<- final_xgb %>%
+ fit(data = bakeddf)
+
+final_xgb %>%
+ fit(data = bakeddf) %>%
+ extract_fit_parsnip() %>%
+ vip(geom = "point")
+
+# final_res <- last_fit(final_xgb, bakeddf)
+# 
+# collect_metrics(final_res)
+
+predxgb <- as.data.frame(rbind(xgb_res[[5]][[1]],
+                               xgb_res[[5]][[2]],
+                               xgb_res[[5]][[3]],
+                               xgb_res[[5]][[4]],
+                               xgb_res[[5]][[5]],
+                               xgb_res[[5]][[6]],
+                               xgb_res[[5]][[7]],
+                               xgb_res[[5]][[8]],
+                               xgb_res[[5]][[9]],
+                               xgb_res[[5]][[10]]))
+
+predxgb2 <- predxgb %>% 
+ filter(.config == "Preprocessor1_Model089")
+
+
+# Obtain predictions
+obs <- predxgb2$drugdx
+pred <- predxgb2$.pred_class
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(data = factor(pred), reference = factor(obs), positive = "Yes")
+
+# Extract the confusion matrix
+cm <- conf_matrix$table
+
+# Calculate True Positives (TP), True Negatives (TN), False Positives (FP), False Negatives (FN)
+TP <- cm[2, 2]
+TN <- cm[1, 1]
+FP <- cm[1, 2]
+FN <- cm[2, 1]
+
+# Calculate Accuracy
+xgb_ACC <- (TP + TN) / sum(cm)
+
+# Calculate Precision
+xgb_PRE <- TP / (TP + FP)
+
+# Calculate False Positive Rate (FPR)
+xgb_FPR <- FP / (FP + TN)
+
+# Calculate True Negative Rate (TNR)
+xgb_TNR <- TN / (TN + FP)
+
+# Calculate True Positive Rate (TPR)
+xgb_TPR <- TP / (TP + FN)
+
+# Calculate AUC
+cut.obj <- cutpointr(x = predxgb2$.pred_Yes,
+                     class = predxgb2$drugdx)
+xgb_AUC = cutpointr::auc(cut.obj)
+
+# Print the results
+print(paste("Area Under Curve (AUC):", xgb_AUC))
+print(paste("Accuracy:", xgb_ACC))
+print(paste("Precision:", xgb_PRE))
+print(paste("False Positive Rate (FPR):", xgb_FPR))
+print(paste("True Negative Rate (TNR):", xgb_TNR))
+print(paste("True Positive Rate (TPR):", xgb_TPR))
+```
+
+
+
+
+# Model Fit Comparison
+
+```{r}
+Model <- c('Logistic Regression', 
+           'Ridge Regression', 
+           'Lasso Regression',
+           'Elastic Net Regression',
+           'Random Forest Model',
+           'Boosted Trees')
+
+ACC <- c(noreg_ACC, ridge_ACC, lasso_ACC, elastic_ACC, rforest_ACC, xgb_ACC)
+AUC <- c(noreg_AUC, ridge_AUC, lasso_AUC, elastic_AUC, rforest_AUC, xgb_AUC)
+FPR <-c(noreg_FPR, ridge_FPR, lasso_FPR, elastic_FPR, rforest_FPR, xgb_FPR)
+PRE <- c(noreg_PRE, ridge_PRE, lasso_PRE, elastic_PRE, rforest_PRE, xgb_PRE)
+TNR <- c(noreg_TNR, ridge_TNR, lasso_TNR, elastic_TNR, rforest_TNR, xgb_TNR)
+TPR <- c(noreg_TPR, ridge_TPR, lasso_TPR, elastic_TPR, rforest_TPR, xgb_TPR)
+
+tab <- data.frame(Model, ACC, AUC, PRE, FPR, TNR, TPR)
+
+# Extract the first column with strings
+Model <- data.frame(Model = tab$Model)
+
+# Remove the first column from the original dataframe
+numeric_df <- tab[, -1]
+
+# Round numeric values in the dataframe
+numeric_df <- round(numeric_df, digits = 2)
+
+# Print the resulting dataframes
+tab <- cbind(Model, numeric_df)
+```
+
